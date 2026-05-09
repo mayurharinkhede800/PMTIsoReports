@@ -1,0 +1,647 @@
+create view public.v_d_fuel_tracking_with_vehicle as
+select
+  d.id as d_id,
+  v.vehicle_number
+from
+  d_fuel_tracking d
+  join m_vehicle v on d.vehicle_id = v.id
+  join m_driver dm on dm.id = d.driver_id;
+  
+ ============================================
+ create view public.v_daily_menu_dishes as
+select
+  m.id as menu_id,
+  m.delivery_date,
+  m.kitchen_id,
+  d.id as dish_id,
+  d.dish_name,
+  d.per_child,
+  d.unit,
+  d.headcount_based
+from
+  d_menu m
+  join d_menu_dish_link mdl on mdl.menu_id = m.id
+  join m_dish d on d.id = mdl.dish_id;
+ ==================================================
+ create view public.v_daily_school_headcount as
+select
+  id,
+  school_id,
+  entry_date,
+  COALESCE(ps, 0) as ps,
+  COALESCE(ups, 0) as ups,
+  COALESCE(zphs, 0) as zphs,
+  COALESCE(ps, 0) + COALESCE(ups, 0) + COALESCE(zphs, 0) as total_students
+from
+  d_school_headcount sh;
+  
+========================================================
+create view public.v_dashboard_alerts as
+select
+  'Missing Headcount'::text as alert,
+  count(*) as count
+from
+  m_schools s
+  left join d_school_headcount h on h.school_id = s.id
+  and h.entry_date = (CURRENT_DATE + 1)
+where
+  s.status = true
+  and h.id is null
+union all
+select
+  'Menu Not Created'::text as alert,
+  count(*) as count
+from
+  m_kitchen k
+where
+  not (
+    exists (
+      select
+        1
+      from
+        d_menu m
+      where
+        m.kitchen_id = k.id
+        and m.delivery_date = (CURRENT_DATE + 1)
+    )
+  );
+ ========================================
+ create view public.v_dashboard_daily_summary as
+select
+  k.id as kitchen_id,
+  CURRENT_DATE as summary_date,
+  count(distinct da.driver_id) as drivers_present,
+  count(distinct rd.vehicle_id) as vehicles_used,
+  COALESCE(sum(ft.amount), 0::numeric) as fuel_cost,
+  COALESCE(sum(lc.quantity), 0::numeric) as lubricant_qty,
+  count(distinct sfr.school_id) as schools_served
+from
+  m_kitchen k
+  left join d_attendance da on da.kitchen_id = k.id
+  and da.attendance_date = CURRENT_DATE
+  left join d_route_data rd on rd.kitchen_id = k.id
+  and rd.route_date = CURRENT_DATE
+  left join d_fuel_tracking ft on ft.kitchen_id = k.id
+  and ft.entry_date = CURRENT_DATE
+  left join d_lubricants_consumption lc on lc.kitchen_id = k.id
+  and lc.entry_date = CURRENT_DATE
+  left join d_school_food_requirement sfr on sfr.delivery_date = CURRENT_DATE
+group by
+  k.id;
+  =========================================================
+  create view public.v_dashboard_dispatch_status as
+select
+  route_date,
+  count(*) filter (
+    where
+      checklist_confirmed = true
+  ) as dispatched,
+  count(*) filter (
+    where
+      checklist_confirmed = false
+  ) as pending
+from
+  d_route_data
+group by
+  route_date;
+  =============================================
+  create view public.v_dashboard_production as
+select
+  m.kitchen_id,
+  m.delivery_date,
+  d.id as dish_id,
+  d.dish_name,
+  d.unit,
+  req.vessel_name,
+  COALESCE(sum(req.quantity), 0::bigint) as total_vessels,
+  COALESCE(
+    sum(
+      req.quantity::numeric * COALESCE(req.vessel_capacity, 1::numeric)
+    ),
+    0::numeric
+  ) as total_quantity
+from
+  d_menu m
+  join d_menu_dish_link mdl on mdl.menu_id = m.id
+  join m_dish d on d.id = mdl.dish_id
+  left join d_school_food_requirement req on req.kitchen_id = m.kitchen_id
+  and req.delivery_date = m.delivery_date
+  and req.dish_id = d.id
+where
+  m.is_holiday = false
+group by
+  m.kitchen_id,
+  m.delivery_date,
+  d.id,
+  d.dish_name,
+  d.unit,
+  req.vessel_name;
+  =====================================
+  create view public.v_dashboard_summary as
+select
+  hc.entry_date as dashboard_date,
+  ms.kitchen_id,
+  sum(hc.total_count) as total_attendance,
+  sum(ms.e_ps + ms.e_ups + ms.e_zphs) as total_enrollment,
+  count(distinct hc.school_id) as running_schools,
+  (
+    select
+      count(*) as count
+    from
+      m_schools s2
+    where
+      s2.kitchen_id = ms.kitchen_id
+      and s2.status = true
+  ) as total_schools,
+  COALESCE(
+    (
+      select
+        round(
+          sum(sfr.vessel_capacity * sfr.quantity::numeric),
+          2
+        ) as round
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%rice%'::text
+    ),
+    0::numeric
+  ) as rice_kg,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%rice%'::text
+    ),
+    0::bigint
+  ) as rice_cauldron,
+  COALESCE(
+    (
+      select
+        round(
+          sum(sfr.vessel_capacity * sfr.quantity::numeric),
+          2
+        ) as round
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and (
+          d.dish_name::text ~~* '%dal%'::text
+          or d.dish_name::text ~~* '%lentil%'::text
+        )
+    ),
+    0::numeric
+  ) as dal_kg,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and (
+          d.dish_name::text ~~* '%dal%'::text
+          or d.dish_name::text ~~* '%lentil%'::text
+        )
+    ),
+    0::bigint
+  ) as dal_cauldron,
+  COALESCE(
+    (
+      select
+        round(
+          sum(sfr.vessel_capacity * sfr.quantity::numeric),
+          2
+        ) as round
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%curry%'::text
+    ),
+    0::numeric
+  ) as curry_kg,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%curry%'::text
+    ),
+    0::bigint
+  ) as curry_cauldron,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%snack%250%'::text
+    ),
+    0::bigint
+  ) as snack_250,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%snack%500%'::text
+    ),
+    0::bigint
+  ) as snack_500,
+  COALESCE(
+    (
+      select
+        sum(sfr.quantity) as sum
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%snack%1%kg%'::text
+    ),
+    0::bigint
+  ) as snack_1kg,
+  COALESCE(
+    (
+      select
+        round(
+          sum(sfr.vessel_capacity * sfr.quantity::numeric),
+          2
+        ) as round
+      from
+        d_school_food_requirement sfr
+        join m_dish d on d.id = sfr.dish_id
+      where
+        sfr.kitchen_id = ms.kitchen_id
+        and sfr.delivery_date = hc.entry_date
+        and d.dish_name::text ~~* '%snack%'::text
+    ),
+    0::numeric
+  ) as snack_kg,
+  COALESCE(
+    (
+      select
+        sum(rd.big_vessel_out) as sum
+      from
+        d_route_data rd
+      where
+        rd.kitchen_id = ms.kitchen_id
+        and rd.route_date = hc.entry_date
+    ),
+    0::bigint
+  ) as vessels_100pct,
+  COALESCE(
+    (
+      select
+        sum(rd.medium_vessel_out) as sum
+      from
+        d_route_data rd
+      where
+        rd.kitchen_id = ms.kitchen_id
+        and rd.route_date = hc.entry_date
+    ),
+    0::bigint
+  ) as vessels_75pct,
+  COALESCE(
+    (
+      select
+        sum(rd.small_vessel_out) as sum
+      from
+        d_route_data rd
+      where
+        rd.kitchen_id = ms.kitchen_id
+        and rd.route_date = hc.entry_date
+    ),
+    0::bigint
+  ) as vessels_50pct,
+  COALESCE(
+    (
+      select
+        sum(rd.mini_vessel_out) as sum
+      from
+        d_route_data rd
+      where
+        rd.kitchen_id = ms.kitchen_id
+        and rd.route_date = hc.entry_date
+    ),
+    0::bigint
+  ) as vessels_25pct,
+  COALESCE(
+    (
+      select
+        sum(
+          rd.big_vessel_out + rd.medium_vessel_out + rd.small_vessel_out + rd.mini_vessel_out
+        ) as sum
+      from
+        d_route_data rd
+      where
+        rd.kitchen_id = ms.kitchen_id
+        and rd.route_date = hc.entry_date
+    ),
+    0::bigint
+  ) as vessels_total
+from
+  d_school_headcount hc
+  join m_schools ms on ms.id = hc.school_id
+group by
+  hc.entry_date,
+  ms.kitchen_id;
+  ====================================================
+  create view public.v_dish_vessel_capacity as
+select
+  dv.dish_id,
+  v.vessels_name as vessel_type,
+  dv.filling_capacity as percent,
+  dv.filling_capacity / 100.0::double precision * md.per_child::double precision as vessel_kg
+from
+  link_dish_vessels dv
+  join m_vessels v on v.id = dv.vessels_id
+  join m_dish md on md.id = dv.dish_id;
+ ======================================================
+ create view public.v_driver_app as
+select
+  d.id as vbcd,
+  v.id as v_id,
+  dm.id as dm_id,
+  v.vehicle_number,
+  v.vehicle_brand
+from
+  d_fuel_tracking d
+  join m_vehicle v on d.vehicle_id = v.id
+  join m_driver dm on dm.id = d.driver_id
+where
+  d.entry_date = '2026-02-11'::date;
+  ================================================
+  create view public.v_driver_daily_master as
+select
+  dr.id as driver_id,
+  dr.driver_name,
+  v.id as vehicle_id,
+  v.vehicle_number,
+  rd.id as route_data_id,
+  r.id as route_id,
+  r.route_name,
+  rd.route_date,
+  rd.out_km,
+  rd.in_km,
+  rd.battery,
+  rd.jack_lever,
+  rd.stepny_rod,
+  rd.stepny,
+  rd.jack,
+  rd.wheel_spanner,
+  rd.spanner_set,
+  rd.screw_set,
+  rd.screw_driver,
+  rd.cutting_plier,
+  rd.insurance,
+  rd.rc,
+  rd.fc,
+  rd.road_tax,
+  rd.permit,
+  rd.pollution_certificate,
+  rd.checklist_confirmed,
+  ft.opening_km,
+  ft.closing_km,
+  ft.total_km,
+  ft.diesel_qty,
+  ft.amount,
+  rd.created_at
+from
+  d_route_data rd
+  join m_routes r on r.id = rd.route_id
+  join m_driver dr on dr.id = rd.driver_id
+  left join m_vehicle v on v.id = rd.vehicle_id
+  left join d_fuel_tracking ft on ft.vehicle_id = rd.vehicle_id
+  and ft.driver_id = rd.driver_id
+  and ft.entry_date = rd.route_date
+where
+  rd.route_date = CURRENT_DATE;
+ =======================================================
+ create view public.v_driver_route_state as
+select
+  route_id,
+  checklist_confirmed,
+  out_km,
+  in_km,
+  out_km is not null as can_indent,
+  in_km is null as can_enter_in_km
+from
+  d_route_data
+where
+  route_date = CURRENT_DATE;
+ ===============================================
+ create view public.v_driver_schools_today as
+select
+  s.id,
+  s.school_name,
+  s.mobile_number,
+  s.sr_no,
+  dr.route_id
+from
+  d_route_data dr
+  join m_schools s on s.route_id = dr.route_id
+where
+  dr.route_date = CURRENT_DATE;
+  ============================================
+  create view public.v_driver_today_checklist as
+select
+  vehicle_id,
+  route_date,
+  battery,
+  jack,
+  stepny,
+  wheel_spanner,
+  insurance,
+  rc,
+  permit,
+  pollution_certificate
+from
+  d_route_data drd
+where
+  route_date = CURRENT_DATE;
+  ===========================================
+  create view public.v_menu_dish_vessels_tomorrow as
+select
+  md.id as menu_id,
+  d.id as dish_id,
+  d.dish_name,
+  v.id as vessels_id,
+  v.vessels_name,
+  l.filling_capacity,
+  round(l.filling_capacity * 100::double precision)::integer as fill_percent
+from
+  d_menu md
+  join d_menu_dish_link mdl on mdl.menu_id = md.id
+  join m_dish d on d.id = mdl.dish_id
+  join link_dish_vessels l on l.dish_id = d.id
+  join m_vessels v on v.id = l.vessels_id
+where
+  md.delivery_date = (CURRENT_DATE + 1);
+  ===========================================
+  create view public.v_menu_dishes as
+select
+  d.id as dish_id,
+  d.dish_name,
+  d.unit,
+  d.headcount_based,
+  v.id as vessels_id,
+  v.vessels_name,
+  ldv.filling_capacity,
+  m.id as menu_id,
+  m.delivery_date as menu_date,
+  m.indent_collection_date,
+  m.kitchen_id,
+  m.program_id,
+  m.route_id,
+  m.school_id,
+  m.is_holiday
+from
+  d_menu m
+  join d_menu_dish_link mdl on mdl.menu_id = m.id
+  join m_dish d on d.id = mdl.dish_id
+  left join link_dish_vessels ldv on ldv.dish_id = d.id
+  left join m_vessels v on v.id = ldv.vessels_id;
+  =====================================================
+  create view public.v_menu_dishes_tomorrow as
+select
+  d.id as dish_id,
+  d.dish_name,
+  d.unit,
+  v.id as vessels_id,
+  v.vessels_name,
+  m.delivery_date,
+  m.kitchen_id,
+  m.program_id
+from
+  d_menu m
+  join d_menu_dish_link mdl on mdl.menu_id = m.id
+  join m_dish d on d.id = mdl.dish_id
+  left join link_dish_vessels ldv on ldv.dish_id = d.id
+  left join m_vessels v on v.id = ldv.vessels_id
+where
+  m.delivery_date = (CURRENT_DATE + '1 day'::interval);
+  =========================================
+  create view public.v_school_headcount_today as
+select
+  s.id as school_id,
+  COALESCE(d.ps, s.e_ps) as ps,
+  COALESCE(d.ups, s.e_ups) as ups,
+  COALESCE(d.zphs, s.e_zphs) as zphs,
+  COALESCE(
+    d.total_count,
+    (s.e_ps + s.e_ups + s.e_zphs)::bigint
+  ) as total
+from
+  m_schools s
+  left join d_school_headcount d on d.school_id = s.id
+  and d.entry_date = CURRENT_DATE;
+  
+ ===================================================
+ create view public.v_school_indent_status as
+select
+  ms.id as school_id,
+  ms.school_name,
+  case
+    when sum(COALESCE(dsfr.quantity, 0)) > 0 then 'COMPLETED'::text
+    else 'PENDING'::text
+  end as indent_status
+from
+  m_schools ms
+  left join d_school_food_requirement dsfr on dsfr.school_id = ms.id
+  and dsfr.delivery_date = (CURRENT_DATE + 1)
+group by
+  ms.id,
+  ms.school_name;
+  ==================================
+  create view public.v_school_indent_status_tomorrow as
+select
+  school_id,
+  delivery_date,
+  count(*) > 0 as is_locked
+from
+  d_school_food_requirement
+where
+  delivery_date = (CURRENT_DATE + '1 day'::interval)
+group by
+  school_id,
+  delivery_date;
+  =====================================
+  create view public.v_school_indent_tomorrow as
+select
+  sfr.school_id,
+  s.school_name,
+  d.dish_name,
+  sfr.vessel_name as vessel_type,
+  sfr.quantity,
+  sfr.delivery_date
+from
+  d_school_food_requirement sfr
+  join m_schools s on s.id = sfr.school_id
+  join m_dish d on d.id = sfr.dish_id
+where
+  sfr.delivery_date = (CURRENT_DATE + '1 day'::interval)
+order by
+  s.school_name,
+  d.dish_name;
+  ===========================================
+  create view public.v_school_next_day_indent as
+select
+  sfr.school_id,
+  s.school_name,
+  sfr.delivery_date,
+  d.dish_name,
+  sfr.vessel_name as vessel_type,
+  sfr.quantity
+from
+  d_school_food_requirement sfr
+  join m_schools s on s.id = sfr.school_id
+  join m_dish d on d.id = sfr.dish_id
+where
+  sfr.delivery_date = (CURRENT_DATE + '1 day'::interval)
+order by
+  s.school_name,
+  d.dish_name;
+  
+  =======================delete view====================
+  
+drop view v_d_fuel_tracking_with_vehicle;
+drop view v_daily_menu_dishes;
+drop view v_daily_school_headcount,v_dashboard_alerts,v_dashboard_daily_summary,v_dashboard_dispatch_status;
+drop view v_dashboard_summary,v_dish_vessel_capacity,v_driver_app,v_driver_daily_master;
+drop view v_driver_route_state,v_driver_schools_today,v_driver_today_checklist,v_menu_dish_vessels_tomorrow;
+drop view v_menu_dishes_tomorrow,v_school_headcount_today,v_school_indent_status;
+drop view v_school_indent_status_tomorrow,v_school_indent_tomorrow,v_school_next_day_indent;
