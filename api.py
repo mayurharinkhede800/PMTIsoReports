@@ -646,4 +646,4 @@ def get_critical_spares_report(
         raise HTTPException(
             status_code=500,
             detail=str(e)
-        )
+        )   
